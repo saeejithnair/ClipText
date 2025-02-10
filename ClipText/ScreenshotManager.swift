@@ -83,6 +83,13 @@ class ScreenshotManager: NSObject {
     
     private func showOverlayWindow() {
         print("Showing overlay window")
+        // Hide the app's main window if it exists
+        NSApplication.shared.windows.forEach { window in
+            if window.title == "ClipText" {
+                window.orderOut(nil)
+            }
+        }
+        
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let frame = screen.frame
         
@@ -93,13 +100,13 @@ class ScreenshotManager: NSObject {
             defer: false
         )
         
-        window.level = .floating
+        window.level = .screenSaver // Higher level to ensure it's above other windows
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
         window.ignoresMouseEvents = false
         window.acceptsMouseMovedEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         
@@ -114,7 +121,19 @@ class ScreenshotManager: NSObject {
         self.selectionView = selectionView
         self.overlayWindow = window
         
+        // Ensure we're the key window and front-most
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        
+        // Register escape key to cancel
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { // Escape key
+                self?.overlayWindow?.orderOut(nil)
+                self?.overlayWindow = nil
+                return nil
+            }
+            return event
+        }
     }
     
     private func captureSelectedRegion(_ rect: NSRect) {
@@ -238,6 +257,8 @@ extension ScreenshotManager: SCStreamOutput {
 class SelectionView: NSView {
     private var startPoint: NSPoint?
     private var currentRect: NSRect?
+    private var instructionLabel: NSTextField?
+    private var loadingIndicator: NSProgressIndicator?
     var onSelectionComplete: ((NSRect) -> Void)?
     
     override init(frame frameRect: NSRect) {
@@ -252,7 +273,41 @@ class SelectionView: NSView {
     
     private func setupView() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.2).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
+        
+        // Add instruction label
+        let label = NSTextField(labelWithString: "Drag to select an area. Press Esc to cancel.")
+        label.textColor = .white
+        label.backgroundColor = .clear
+        label.font = .systemFont(ofSize: 12)
+        label.alignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 20)
+        ])
+        
+        instructionLabel = label
+        
+        // Add loading indicator (initially hidden)
+        let indicator = NSProgressIndicator()
+        indicator.style = .spinning
+        indicator.isIndeterminate = true
+        indicator.isHidden = true
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(indicator)
+        
+        NSLayoutConstraint.activate([
+            indicator.centerXAnchor.constraint(equalTo: centerXAnchor),
+            indicator.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        
+        loadingIndicator = indicator
+        
+        // Set cursor
+        NSCursor.crosshair.set()
     }
     
     override func mouseDown(with event: NSEvent) {
@@ -276,24 +331,70 @@ class SelectionView: NSView {
     }
     
     override func mouseUp(with event: NSEvent) {
-        guard let rect = currentRect else { return }
-        onSelectionComplete?(rect)
-        startPoint = nil
-        currentRect = nil
+        guard let rect = currentRect, rect.width > 1, rect.height > 1 else { return }
+        
+        // Show loading indicator
+        instructionLabel?.isHidden = true
+        loadingIndicator?.isHidden = false
+        loadingIndicator?.startAnimation(nil)
+        
+        // Slight delay to show the loading indicator
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.onSelectionComplete?(rect)
+        }
+    }
+    
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // Esc key
+            window?.close()
+        }
     }
     
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         
         if let rect = currentRect {
-            NSColor.clear.set()
+            // Draw dimming overlay
+            NSColor.black.withAlphaComponent(0.5).setFill()
+            let path = NSBezierPath(rect: bounds)
+            path.fill()
+            
+            // Clear the selection area
+            NSColor.clear.setFill()
             let selectionPath = NSBezierPath(rect: rect)
             selectionPath.fill()
             
-            NSColor.white.set()
+            // Draw selection border with system accent color
+            NSColor.systemBlue.setStroke()
             let strokePath = NSBezierPath(rect: rect)
-            strokePath.lineWidth = 1.0
+            strokePath.lineWidth = 2.0
             strokePath.stroke()
+            
+            // Draw selection handles
+            let handleSize: CGFloat = 6.0
+            let handles = [
+                NSRect(x: rect.minX - handleSize/2, y: rect.minY - handleSize/2, width: handleSize, height: handleSize),
+                NSRect(x: rect.maxX - handleSize/2, y: rect.minY - handleSize/2, width: handleSize, height: handleSize),
+                NSRect(x: rect.minX - handleSize/2, y: rect.maxY - handleSize/2, width: handleSize, height: handleSize),
+                NSRect(x: rect.maxX - handleSize/2, y: rect.maxY - handleSize/2, width: handleSize, height: handleSize)
+            ]
+            
+            NSColor.white.setFill()
+            for handle in handles {
+                let handlePath = NSBezierPath(rect: handle)
+                handlePath.fill()
+            }
         }
+    }
+    
+    func showProcessingState() {
+        instructionLabel?.isHidden = true
+        loadingIndicator?.isHidden = false
+        loadingIndicator?.startAnimation(nil)
+    }
+    
+    func hideProcessingState() {
+        loadingIndicator?.isHidden = true
+        loadingIndicator?.stopAnimation(nil)
     }
 } 

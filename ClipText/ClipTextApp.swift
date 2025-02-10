@@ -14,6 +14,13 @@ struct ClipTextApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .frame(minWidth: 320, maxWidth: 320, minHeight: 320, maxHeight: 320)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
         }
     }
 }
@@ -23,10 +30,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenshotManager: ScreenshotManager?
     private var ocrService: OCRService?
     private var statusItem: NSStatusItem?
+    private var mainWindow: NSWindow?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupWindow()
         setupStatusBarItem()
         setupServices()
+        
+        // Ensure the app keeps running even when the window is closed
+        NSApp.setActivationPolicy(.accessory)
+    }
+    
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Don't quit when the window is closed
+        return false
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean up any resources
+        hotkeyManager = nil
+        screenshotManager = nil
+        ocrService = nil
+    }
+    
+    private func setupWindow() {
+        // Configure the main window to be more native-looking
+        if let window = NSApplication.shared.windows.first {
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isMovableByWindowBackground = true
+            window.backgroundColor = .clear
+            window.hasShadow = true
+            window.standardWindowButton(.closeButton)?.isHidden = false
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
+            
+            // Add rounded corners to match the content
+            window.appearance = NSAppearance(named: .vibrantDark)
+            window.isOpaque = false
+            window.hasShadow = true
+            
+            if let contentView = window.contentView {
+                contentView.wantsLayer = true
+                contentView.layer?.cornerRadius = 24
+                contentView.layer?.masksToBounds = true
+            }
+            
+            // Center the window
+            if let screen = NSScreen.main {
+                let x = (screen.frame.width - window.frame.width) / 2
+                let y = (screen.frame.height - window.frame.height) / 2
+                window.setFrameOrigin(NSPoint(x: x, y: y))
+            }
+            
+            mainWindow = window
+        }
     }
     
     private func setupStatusBarItem() {
@@ -37,11 +95,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         let menu = NSMenu()
-        let captureItem = NSMenuItem(title: "Capture (⌃⇧9)", action: #selector(startCapture), keyEquivalent: "9")
+        let captureItem = NSMenuItem(title: "Capture Text (⌃⇧9)", action: #selector(startCapture), keyEquivalent: "9")
         captureItem.keyEquivalentModifierMask = [.control, .shift]
         captureItem.target = self
         menu.addItem(captureItem)
         
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Show Window", action: #selector(showMainWindow), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         
@@ -55,8 +115,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         screenshotManager = ScreenshotManager()
         ocrService = OCRService(apiKey: apiKey)
         
+        // Initialize hotkey manager
         hotkeyManager = HotkeyManager()
         hotkeyManager?.onHotkeyTriggered = { [weak self] in
+            // Hide the main window if it's visible
+            self?.mainWindow?.orderOut(nil)
+            
+            // Start the capture process
             self?.handleHotkeyTriggered()
         }
     }
@@ -66,13 +131,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func handleHotkeyTriggered() {
-        screenshotManager?.captureRegion { [weak self] image in
-            guard let image = image else {
-                NotificationManager.shared.showError(message: "Failed to capture screenshot")
-                return
+        // Hide the main window before capture
+        mainWindow?.orderOut(nil)
+        
+        // Small delay to ensure window is hidden
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.screenshotManager?.captureRegion { [weak self] image in
+                guard let image = image else {
+                    NotificationManager.shared.showError(message: "Failed to capture screenshot")
+                    return
+                }
+                
+                self?.processImage(image)
             }
-            
-            self?.processImage(image)
         }
     }
     
@@ -105,5 +176,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+    
+    @objc private func showMainWindow() {
+        mainWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

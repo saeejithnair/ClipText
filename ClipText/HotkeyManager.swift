@@ -1,44 +1,79 @@
 import Cocoa
-import Carbon
+import Carbon.HIToolbox
 
 class HotkeyManager {
-    private var eventMonitor: Any?
     var onHotkeyTriggered: (() -> Void)?
+    private var eventHandlerRef: EventHandlerRef?
+    private var hotKeyRef: EventHotKeyRef?
     
     init() {
-        setupHotkeyMonitor()
-    }
-    
-    private func setupHotkeyMonitor() {
-        // Monitor for key down events
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.keyDown]
-        ) { [weak self] event in
-            // Check for Control+Shift+9
-            if event.modifierFlags.contains([.control, .shift]) &&
-               event.keyCode == 25 { // 25 is the keycode for '9'
-                DispatchQueue.main.async {
-                    self?.onHotkeyTriggered?()
-                }
-            }
-        }
-        
-        // Also monitor for local key events (when app is active)
-        NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            if event.modifierFlags.contains([.control, .shift]) &&
-               event.keyCode == 25 {
-                DispatchQueue.main.async {
-                    self?.onHotkeyTriggered?()
-                }
-                return nil // Consume the event
-            }
-            return event
-        }
+        registerHotkey()
     }
     
     deinit {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
+        unregisterHotkey()
+    }
+    
+    private func registerHotkey() {
+        // Define the hotkey (Control + Shift + 9)
+        var keyID = EventHotKeyID()
+        keyID.signature = OSType("CLIP".utf8.reduce(0) { ($0 << 8) + UInt32($1) })
+        keyID.id = UInt32(0)
+        
+        // Create the event type spec
+        var eventType = EventTypeSpec()
+        eventType.eventClass = OSType(kEventClassKeyboard)
+        eventType.eventKind = OSType(kEventHotKeyPressed)
+        
+        // Install event handler
+        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { (nextHandler, eventRef, userData) -> OSStatus in
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(userData!).takeUnretainedValue()
+                manager.hotkeyPressed()
+                return noErr
+            },
+            1,
+            &eventType,
+            selfPtr,
+            &eventHandlerRef
+        )
+        
+        guard status == noErr else {
+            print("Failed to install event handler")
+            return
+        }
+        
+        // Register the hotkey
+        let hotKeyStatus = RegisterEventHotKey(
+            UInt32(25),  // Virtual keycode for '9'
+            UInt32(controlKey | shiftKey), // Modifiers
+            keyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        
+        guard hotKeyStatus == noErr else {
+            print("Failed to register hotkey")
+            return
+        }
+    }
+    
+    private func unregisterHotkey() {
+        if let hotKeyRef = hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        
+        if let eventHandlerRef = eventHandlerRef {
+            RemoveEventHandler(eventHandlerRef)
+        }
+    }
+    
+    @objc private func hotkeyPressed() {
+        DispatchQueue.main.async { [weak self] in
+            self?.onHotkeyTriggered?()
         }
     }
 } 
