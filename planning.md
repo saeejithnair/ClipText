@@ -1,274 +1,267 @@
-## 1. Analysis of Current Issues
-
-1. **Unstable and Non-Sequential Flow**  
-   - **Multiple Asynchronous Paths:**  
-     The previous code contained numerous asynchronous blocks (multiple `Task {}`, `DispatchQueue.main.asyncAfter`, and asynchronous ScreenCaptureKit callbacks). This led to race conditions and inconsistent state management (especially around resource release and cancellation).  
-   - **Complex State Transitions:**  
-     The design had multiple overlapping states (overlay display, region selection, image capture, OCR processing, timeouts) that were not clearly delineated or executed in a strict sequence.
-
-2. **Inadequate Error Handling and Resource Cleanup**  
-   - **Hanging During Screen Capture:**  
-     Rapidly invoking captures sometimes left the app stuck with an active ScreenCaptureKit (`SCStream`) that was neither fully stopped nor properly deallocated.  
-   - **Forced Reboot on Errors:**  
-     In the event of unhandled errors (e.g., image conversion or OCR issues), the app state became corrupted, necessitating a full reboot.  
-   - **Cancellation Issues:**  
-     The ESC key logic was split across multiple event monitors (overlay, selection view), making it unreliable in tearing down all streams, overlays, and event taps.
-
-3. **UI/UX Inconsistencies**  
-   - **Spinner/Loading Indicator Placement:**  
-     The existing spinner was centered on the screen instead of positioned in the top-left corner as specified.  
-   - **Overlay and Self-Capture Risks:**  
-     The method of hiding the app’s own window and stacking a borderless overlay was error-prone, occasionally capturing ClipText UI elements if the sequence of hiding and capturing overlapped.
-
-4. **Other Concerns**  
-   - **Hardcoded API Key:**  
-     Having an API key directly in the code was insecure and not easily changeable.  
-   - **Multiple Timeouts, No OCR-Specific Timeout:**  
-     Various timeouts existed for overlay display and transitions, but none dedicated solely to the OCR call.  
-   - **Inconsistent Resource Cleanup:**  
-     Event monitors, `SCStream` objects, and overlays were not always disposed of correctly, causing potential memory leaks and a “stuck” capture state if partial captures were interrupted.
+# **ClipText v2 – Comprehensive Product Requirements Document**
 
 ---
 
-## 2. High-Level Product Vision
+## **1. Overview**
 
-**ClipText v2** is a **native macOS application** that captures a user-defined screen region (triggered by a global hotkey), performs OCR via a third-party (Gemini) OCR service, and places the extracted text on the system clipboard. This version emphasizes:
-
-1. A strictly **sequential** capture → OCR → clipboard pipeline.  
-2. A **single** asynchronous timeout (for the OCR API call), avoiding multiple competing timers.  
-3. Reliable **cancellation** via the ESC key at any stage, cleaning up all resources.  
-4. A **minimal UI** that avoids self-capture and provides a smooth user experience.
+ClipText v2 is a native macOS application designed to provide a fast and reliable way for users to capture a selected region of their screen, extract text using the Gemini OCR API, and copy the resulting Markdown/LaTeX text to the clipboard. This version uses modern, supported APIs—most notably ScreenCaptureKit for screen capture—to replace deprecated methods (e.g. CGWindowListCreateImage) and enforce a strictly sequential (synchronous) flow, except for a single asynchronous network timeout.
 
 ---
 
-## 3. Objectives & User Stories
+## **2. Objectives**
 
-### 3.1 Objectives
+### **Primary Objective**
+- Build an application that triggers on a global hotkey (default: Ctrl+Shift+9), allowing the user to hide the UI, select a screen region, capture a single frame, process it with OCR, and copy the text result to the clipboard.
 
-1. **Simplify the Capture Flow**  
-   - One hotkey press → hide ClipText UI → user selects region → capture one frame → OCR → copy text → done.
-
-2. **Robust Error Handling**  
-   - Any capture or OCR error immediately exits the process, frees resources, and notifies the user.
-
-3. **Single API Timeout**  
-   - Only the OCR API call has a dedicated timeout (e.g., 10 seconds).
-
-4. **Seamless Cancellation**  
-   - Pressing ESC at any point cancels and tears down all overlays, streams, or event monitors.
-
-5. **Security & Maintainability**  
-   - No hardcoded API keys (use secure storage or environment variables).  
-   - Code structured into manageable components for easy troubleshooting and updates.
-
-### 3.2 User Stories
-
-- **As a user**, I can press **Ctrl+Shift+9** to initiate a screen capture and place the extracted text on my clipboard.  
-- **As a user**, I see a **spinner in the top-left corner** while OCR processing is ongoing.  
-- **As a user**, I can **cancel** at any time by pressing **ESC**, which cleans up all resources immediately.  
-- **As a user**, if something goes wrong (e.g., network issue), I see an **alert or notification** and the process terminates.  
-- **As a user**, I expect the text to appear in my clipboard on successful completion, without capturing the ClipText UI in the image.
+### **Secondary Objectives**
+- **Sequential Flow:** Ensure the capture, processing, and clipboard update operations follow a linear pipeline with minimal asynchronous branching.
+- **Modern API Usage:** Replace deprecated APIs with ScreenCaptureKit (using SCStream, SCShareableContent, and SCScreenshotManager) to capture screen content reliably on macOS 15 and later.
+- **Robust Error Handling:** Provide clear error and cancellation handling with immediate resource cleanup.
+- **Security & Maintainability:** Secure API keys (via secure storage or environment variables) and organize code into modular components for ease of testing and maintenance.
+- **Native UX:** Ensure that the app’s UI (overlays, indicators, etc.) is never captured in the screenshot and that users receive immediate feedback via notifications or alerts.
 
 ---
 
-## 4. Functional Requirements
+## **3. User Stories**
 
-### 4.1 Global Hotkey Registration
+- **Hotkey Activation:**  
+  *“As a user, I want to press a custom global hotkey (Ctrl+Shift+9) so that I can quickly initiate a screen capture.”*
 
-1. **Requirement:**  
-   - The application registers a global hotkey (default: **Ctrl+Shift+9**) that initiates the capture sequence.
-2. **Details:**  
-   - On hotkey press, any visible ClipText UI is hidden, and a full-screen overlay is displayed.  
-   - **Implementation Note**: While the Carbon `RegisterEventHotKey` API is not strictly “modern,” it remains one of the most reliable approaches for system-wide hotkey capture on macOS.
+- **Region Selection:**  
+  *“As a user, I want to see a dimmed overlay that lets me select a specific region on the screen using a familiar drag-to-select interface.”*
 
-### 4.2 Single-Frame Screenshot & Overlay (ScreenCaptureKit)
+- **Processing Feedback:**  
+  *“As a user, I want to see a spinner in the top-left corner immediately after my selection so that I know processing is in progress.”*
 
-1. **Requirement:**  
-   - Display a **borderless, full-screen overlay** allowing the user to drag-select a region, then capture exactly one frame from that region using **ScreenCaptureKit**.
-2. **Cancellation:**  
-   - Pressing **ESC** closes the overlay, stops any ongoing screen streams, and returns the app to idle.
-3. **UI Exclusion:**  
-   - Hide the main ClipText window to avoid accidental self-capture.
-4. **Implementation (macOS 15+):**  
-   - **Overlay & Selection:**  
-     - Create an `NSWindow` with style mask `.borderless` and window level `NSWindow.Level.screenSaver`.  
-     - Implement a custom `NSView` (e.g., `SelectionView`) for mouse event handling (`mouseDown`, `mouseDragged`, `mouseUp`) and drawing the selection rectangle.  
-   - **Screen Capture Using ScreenCaptureKit (`SCStream`)**  
-     1. Use `SCShareableContent` to discover available displays or windows.  
-     2. Configure an `SCStreamConfiguration` specifying the capture region (`sourceRect`) and output dimensions.  
-     3. Start the `SCStream`, and implement the `SCStreamOutput` delegate to receive frames.  
-     4. Once the **first frame** is received, stop the stream immediately.  
-     5. Convert the captured frame (buffer) to an `NSImage` for later OCR processing.  
-   - **Alternative (`SCScreenshotManager`)**  
-     - For one-off captures, consider using `SCScreenshotManager.captureImage(contentFilter:configuration:completionHandler:)`.  
-     - This approach can be simpler, but some developers report extra latency for repeated use.
+- **Cancellation:**  
+  *“As a user, I want to cancel the capture at any point by pressing the ESC key, with all operations terminating gracefully.”*
 
-### 4.3 Processing Indicator
+- **Clipboard Result:**  
+  *“As a user, I want the text extracted via OCR to be automatically copied to my clipboard if the capture is successful.”*
 
-1. **Requirement:**  
-   - After the user releases the mouse and a capture request is initiated, display a **spinner** in the **top-left corner** to indicate processing.
-2. **Implementation:**  
-   - An `NSProgressIndicator` with `.spinning` style is added to the overlay `NSView`.  
-   - It remains visible until OCR succeeds or fails (or until the user presses ESC).
-
-### 4.4 Gemini OCR API Integration
-
-1. **Requirement:**  
-   - Convert the captured image to PNG, then POST it to the Gemini OCR endpoint with a single, dedicated **timeout** (e.g., 10 seconds).
-2. **Implementation:**  
-   - Use `NSBitmapImageRep` to convert the `NSImage` (from the `SCStream` frame) into PNG data.  
-   - Construct a `URLSession` request with a 10-second timeout.  
-   - Send the image as part of the POST request body, parse the JSON on success.
-3. **Error Handling:**  
-   - On failure (network error, invalid response, or timeout), display an alert and terminate the capture sequence (cleanup everything).
-
-### 4.5 Clipboard Management
-
-1. **Requirement:**  
-   - If the OCR result is valid, copy the extracted text to the system clipboard.
-2. **Implementation:**  
-   - Use `NSPasteboard.general`.  
-   - Clear existing content and write the new text in a single operation.
-
-### 4.6 Error Handling & Resource Cleanup
-
-1. **Requirement:**  
-   - On **any error**, the app must:  
-     1. Show a brief alert (`NSAlert`) or local notification.  
-     2. Stop and release the `SCStream`, remove overlay windows, remove event monitors, and reset internal state.
-2. **Cancellation (ESC)**  
-   - At any stage (overlay selection, frame capture, OCR), pressing ESC triggers the same cleanup logic and displays a “capture canceled” notification (optional).
+- **Error Notification:**  
+  *“As a user, if an error occurs (during capture, image conversion, network communication, or OCR), I want to be promptly notified and have the process clean up without leaving residual resources.”*
 
 ---
 
-## 5. Non-Functional Requirements
+## **4. Functional Requirements**
 
-1. **Performance & Responsiveness:**  
-   - The capture → OCR → clipboard flow should feel near-instant, constrained mainly by the network/OCR call.  
-   - Overhead from starting/stopping an `SCStream` should remain minimal given a one-shot frame capture.
-2. **Security:**  
-   - API keys are not hardcoded. They should be retrieved from Keychain, environment variables, or another secure method.  
-   - macOS’s built-in permissions prompt for screen recording must be handled gracefully.
-3. **Maintainability:**  
-   - Code is segmented into modules (Hotkey Manager, Capture Manager, OCR Service, Clipboard Manager) to ensure clarity.  
-   - Detailed error reporting or logging can aid troubleshooting.
-4. **Resource Management:**  
-   - All ephemeral resources (overlay windows, event monitors, `SCStream` instances) must be created on capture start and fully deallocated on completion or cancellation.
-5. **Stability:**  
-   - Repeated captures in quick succession (multiple hotkey presses) should not crash the app or leave residual streams or monitors.
+### **4.1 Global Hotkey Registration**
+- **Requirement:**  
+  Register a system-wide hotkey (default: Ctrl+Shift+9) that initiates the capture process.
+- **Implementation:**  
+  - Use Carbon’s `RegisterEventHotKey` (see [RegisterEventHotKey](citeturn0search0)) for reliable global hotkey registration.
+  - On hotkey press, the app immediately hides its UI and transitions to capture mode.
+
+### **4.2 Overlay & Region Selection**
+- **Requirement:**  
+  Display a full-screen, borderless overlay to allow users to select a screen region.
+- **Implementation:**  
+  - Create an `NSWindow` with `NSWindow.StyleMask.borderless` and set its level to `NSWindow.Level.screenSaver`.
+  - Use `NSWindow.CollectionBehavior.canJoinAllSpaces` and `fullScreenAuxiliary` to ensure coverage across all monitors.
+  - Implement a custom `NSView` (e.g., `SelectionView`) that:
+    - Listens for mouse events (`mouseDown`, `mouseDragged`, `mouseUp`) to draw a dynamic selection rectangle.
+    - Excludes the app’s UI from the capture.
+- **Cancellation:**  
+  - Install an event monitor with `NSEvent.addLocalMonitorForEvents(matching: .keyDown)` to detect the ESC key (key code 53) and cancel the capture process immediately.
+
+### **4.3 Screen Capture Using ScreenCaptureKit**
+- **Requirement:**  
+  Capture a single frame from the user-selected region using modern ScreenCaptureKit APIs.
+- **Implementation:**  
+  - **For macOS 15 and Later:**  
+    1. **Obtain Shareable Content:**  
+       - Use `SCShareableContent.excludingDesktopWindows(onScreenWindowsOnly: true)` to retrieve available capture sources.
+    2. **Configure Capture:**  
+       - Create an `SCStreamConfiguration` and set:
+         - `sourceRect` to the selected region.
+         - `width` and `height` to match the region’s dimensions.
+         - Other properties (e.g., shadow settings, cursor visibility) as needed.
+    3. **Capture a Frame:**  
+       - Start an `SCStream` with the configuration.
+       - Implement a delegate (or use a completion block via the `SCStreamOutput` protocol) to receive the first frame.
+       - Immediately stop the stream after capturing one frame.
+       - If synchronous behavior is required, utilize dispatch semaphores or groups to wait for the frame callback.
+  - **Alternative:**  
+    - Use `SCScreenshotManager.captureImage(contentFilter:configuration:completionHandler:)` for a simplified asynchronous capture if performance and latency are acceptable.
+- **References:**  
+  - [ScreenCaptureKit Documentation](citeturn0search1)  
+  - [SCStream Documentation](citeturn0search4)
+
+### **4.4 Image Conversion & OCR Service Integration**
+- **Image Conversion:**  
+  - Convert the captured frame (buffer/IOSurface) to a PNG image using `NSBitmapImageRep`.
+- **OCR Service:**  
+  - Send the PNG image to the Gemini OCR API using `URLSession` with a single, dedicated timeout.
+  - Parse the JSON response to extract formatted text (Markdown/LaTeX).
+- **Error Handling:**  
+  - On failure during conversion or network communication, terminate the process and display an error notification.
+
+### **4.5 Clipboard Management**
+- **Requirement:**  
+  Copy the resulting text to the system clipboard upon successful OCR processing.
+- **Implementation:**  
+  - Use `NSPasteboard.general` to clear the existing content and write the new text in a single, atomic operation.
+
+### **4.6 User Notifications & Alerts**
+- **Requirement:**  
+  Provide immediate feedback to the user on success, error, or cancellation.
+- **Implementation:**  
+  - Use `UNUserNotificationCenter` for background local notifications.
+  - Utilize `NSAlert` for modal error messages when needed.
 
 ---
 
-## 6. System Architecture
+## **5. Non-Functional Requirements**
 
-### 6.1 Components
+- **Responsiveness:**  
+  - The overall flow (capture → OCR → clipboard update) should be near-instantaneous, constrained mainly by the OCR API’s response time.
+- **Stability:**  
+  - The app must gracefully handle rapid hotkey presses, ensuring no resource leaks or crashes.
+- **Security:**  
+  - Sensitive information such as API keys must be loaded securely (via Keychain or environment variables) and not hardcoded.
+- **Maintainability:**  
+  - Code should be modular (e.g., separate managers for hotkey, capture, OCR, clipboard, notifications) and well-documented.
+- **Resource Management:**  
+  - All temporary resources (overlay windows, SCStream instances, event monitors) must be released immediately upon completion, cancellation, or error.
+
+---
+
+## **6. System Architecture**
+
+### **6.1 Components**
 
 1. **Hotkey Manager**  
-   - Manages global hotkey registration with `RegisterEventHotKey`.  
-   - Triggers the capture flow on the main thread.
+   - **Role:**  
+     Registers the global hotkey (via `RegisterEventHotKey`) and triggers the capture process.
+   - **Key API:**  
+     - Carbon API: `RegisterEventHotKey`
 
-2. **Capture Manager**  
-   - Presents the full-screen overlay via an `NSWindow` + custom `NSView`.  
-   - Tracks the selection rectangle and receives ESC events through `NSEvent.addLocalMonitorForEvents(matching: .keyDown)`.  
-   - Uses **ScreenCaptureKit** (`SCStream`) with a configured region to capture the selected area.
+2. **Capture Manager & Overlay**  
+   - **Role:**  
+     Displays a borderless overlay, handles region selection, and initiates screen capture.
+   - **Key APIs:**  
+     - `NSWindow` (with `borderless` style, `NSWindow.Level.screenSaver`)
+     - Custom `NSView` for handling mouse events
+     - `NSEvent.addLocalMonitorForEvents(matching:)` for ESC key detection
 
-3. **Processing Indicator**  
-   - An `NSProgressIndicator` that appears in the top-left corner once capture starts and remains until OCR completes or fails.
+3. **Screen Capture Module**  
+   - **Role:**  
+     Captures a single frame from the selected region using ScreenCaptureKit.
+   - **Key APIs:**  
+     - `SCShareableContent`
+     - `SCStreamConfiguration`  
+     - `SCStream` (or alternatively, `SCScreenshotManager.captureImage`)
+     - Delegation / completion handlers for frame retrieval
+   - **Synchronous Handling:**  
+     - Use dispatch semaphores or groups to wait for the frame if needed
 
-4. **OCR Service**  
-   - Converts `NSImage` → PNG (`NSBitmapImageRep`) and sends it to the Gemini OCR endpoint using `URLSession`.  
-   - Implements a single 10-second request timeout.
+4. **Image Conversion & OCR Service**  
+   - **Role:**  
+     Converts the captured frame into PNG data and sends it to the Gemini OCR API.
+   - **Key APIs:**  
+     - `NSBitmapImageRep`
+     - `URLSession` and `URLRequest` with a timeout
 
 5. **Clipboard Manager**  
-   - Replaces clipboard contents with the OCR result via `NSPasteboard.general`.
+   - **Role:**  
+     Copies the OCR text to the system clipboard.
+   - **Key API:**  
+     - `NSPasteboard.general`
 
-6. **Notification/Alert Manager**  
-   - Handles success or error notifications using `NSAlert` or `UNUserNotificationCenter`.
+6. **Notification & Alert Manager**  
+   - **Role:**  
+     Provides user feedback via notifications and alerts.
+   - **Key APIs:**  
+     - `UNUserNotificationCenter`
+     - `NSAlert`
 
 7. **Resource Manager**  
-   - Ensures overlays, streams, and event monitors are cleaned up in any exit scenario (success, error, or cancellation).
+   - **Role:**  
+     Ensures that overlays, event monitors, and SCStream instances are properly cleaned up.
+   - **Key Responsibility:**  
+     - Immediate teardown on cancellation, errors, or completion
 
-### 6.2 Data Flow Diagram
+### **6.2 Data Flow Diagram**
 
 ```mermaid
 flowchart TD
-    A[Hotkey Pressed (RegisterEventHotKey)] --> B[Hide Main UI & Show Overlay (NSWindow)]
-    B --> C[User Selects Region (Custom NSView)]
-    C --> D[User Releases Mouse => Region Defined]
-    D --> E[Configure SCStream (sourceRect, dimensions)]
-    E --> F[Start SCStream, Wait for First Frame]
-    F --> G[Receive Frame (SCStreamOutput Callback)]
-    G --> H[Stop SCStream, Convert Frame to NSImage -> PNG]
-    H --> I[Send PNG to Gemini OCR API (URLSession) w/ Timeout]
-    I --> J{Response OK?}
-    J -- Yes --> K[Extract & Copy Text to Clipboard (NSPasteboard)]
-    K --> L[Show Success Notification & Cleanup]
-    J -- No/Timeout --> M[Show Error Alert & Cleanup]
-    B -. ESC Pressed .-> N[Cancel Capture, Stop SCStream, Cleanup]
+    A[Hotkey Pressed (RegisterEventHotKey)] --> B[Hide Main UI & Display Overlay (NSWindow)]
+    B --> C[User Selects Region (Custom NSView handling mouse events)]
+    C --> D[User Releases Mouse]
+    D --> E[Initialize SCStream with SCStreamConfiguration (ScreenCaptureKit)]
+    E --> F[Wait for first frame via SCStreamOutput callback]
+    F --> G[Stop SCStream & Convert Frame to PNG (NSBitmapImageRep)]
+    G --> H[Send PNG to Gemini OCR API (URLSession, URLRequest with timeout)]
+    H --> I{OCR Response OK?}
+    I -- Yes --> J[Extract text & Copy to Clipboard (NSPasteboard)]
+    J --> K[Show Success Notification (UNUserNotificationCenter/NSAlert) & Cleanup]
+    I -- No/Timeout --> L[Show Error Notification & Cleanup]
+    B -. ESC Pressed .-> M[Cancel Capture, Stop SCStream, Cleanup]
 ```
 
 ---
 
-## 7. Implementation & Testing Plan
+## **7. Implementation Plan**
 
-1. **Environment Setup**  
-   - Use the latest Xcode and Swift for a Cocoa app targeting macOS 15+.  
-   - Ensure the user has granted Screen Recording permissions if required by ScreenCaptureKit.
+### **7.1 Environment Setup**
+- Use the latest Xcode and Swift with a Cocoa App template.
+- Ensure all sensitive credentials (API keys) are managed securely.
 
-2. **Development Flow**  
-   1. **Hotkey Manager**:  
-      - Create a utility class to register **Ctrl+Shift+9** and call the capture logic on the main thread.  
-   2. **Overlay & Selection**:  
-      - Implement a borderless `NSWindow` with a custom `SelectionView` that handles mouse events and ESC.  
-   3. **ScreenCaptureKit**:  
-      - Set up an `SCStreamConfiguration` for capturing the selected rectangle.  
-      - Use `SCShareableContent` to select the display or region.  
-      - Implement `SCStreamOutput` delegate to receive frames, capturing the first frame only.  
-   4. **OCR Service**:  
-      - Convert the image buffer to `NSImage`, then to PNG data (`NSBitmapImageRep`).  
-      - Perform a POST request with `URLSession` (single 10-second timeout).  
-   5. **Clipboard & Notifications**:  
-      - On success, copy the OCR text to `NSPasteboard`.  
-      - Show an `NSAlert` or user notification for success or failure.  
-   6. **Cleanup**:  
-      - On completion, error, or cancellation, remove the overlay window, stop `SCStream`, remove event monitors, and restore the app to idle.
+### **7.2 Module Development**
+1. **Hotkey Manager:**  
+   - Implement using Carbon’s `RegisterEventHotKey`.
+   - Test global hotkey registration and conflict resolution.
 
-3. **Testing Approach**  
-   - **Unit Tests**:  
-     - Validate each manager/class (Hotkey Manager, Capture Manager, OCR Service) in isolation.  
-   - **Integration Tests**:  
-     - Run the entire flow end-to-end: from hotkey press to successful text capture.  
-     - Induce errors (invalid OCR response, network issues) to confirm robust cleanup.  
-   - **Stress Tests**:  
-     - Press the hotkey repeatedly or rapidly to confirm no resource leaks or hangs.  
-   - **Permission Tests**:  
-     - Validate correct handling of Screen Recording permission prompts.
+2. **Overlay & Region Selection:**  
+   - Develop a borderless `NSWindow` and custom selection view.
+   - Handle mouse events and draw a dynamic selection rectangle.
+   - Implement ESC key monitoring for cancellation.
 
----
+3. **Screen Capture Module:**  
+   - Replace deprecated CG APIs with ScreenCaptureKit:
+     - Configure `SCStreamConfiguration` with the selected region.
+     - Start an `SCStream` and capture the first frame via delegate/callback.
+     - Consider using semaphores/dispatch groups to simulate synchronous capture.
+   - Alternatively, evaluate using `SCScreenshotManager.captureImage` if latency is acceptable.
 
-## 8. Future Enhancements
+4. **Image Conversion & OCR Integration:**  
+   - Convert the captured image to PNG using `NSBitmapImageRep`.
+   - Create a POST request with `URLSession` and enforce a timeout.
+   - Parse JSON response to extract formatted text.
 
-1. **User-Configurable Hotkeys**  
-   - Allow users to change **Ctrl+Shift+9** to another combination within a preference pane.
-2. **Multi-Provider OCR**  
-   - Support multiple OCR endpoints or fallback logic if Gemini OCR is offline.
-3. **Preferences / Settings**  
-   - Customize timeouts, toggle UI spinner position, or adjust selection border color.
-4. **Analytics & Logging**  
-   - Optionally log usage metrics or store logs for diagnostic purposes.
-5. **Localization**  
-   - Add support for multiple languages for UI text and potential OCR output settings.
+5. **Clipboard & Notifications:**  
+   - Use `NSPasteboard` to atomically update the clipboard.
+   - Trigger success or error notifications using `UNUserNotificationCenter` and/or `NSAlert`.
+
+6. **Resource Cleanup:**  
+   - Implement a cleanup routine that stops SCStream, removes event monitors, and dismisses overlays.
+
+### **7.3 Testing Strategy**
+- **Unit Tests:**  
+  - Test individual modules (hotkey, overlay, capture, OCR service, clipboard update).
+- **Integration Tests:**  
+  - Validate the full workflow from hotkey press through to clipboard update.
+- **Stress Tests:**  
+  - Rapid hotkey activations to ensure no resource leaks or UI hangs.
+- **Error Simulation:**  
+  - Simulate network failures, OCR timeouts, or capture cancellation to verify robust error handling.
 
 ---
 
-## 9. Summary
+## **8. Future Enhancements**
 
-This **updated PRD** for **ClipText v2** incorporates Apple’s **ScreenCaptureKit** to capture the user’s selected region on macOS 15+ and addresses all previously identified issues:
+- **Customizable Hotkeys:**  
+  - Allow users to reassign the default hotkey.
+- **Multiple OCR Providers:**  
+  - Add fallback or alternative OCR APIs.
+- **Preference Pane:**  
+  - Provide a settings window for API key management, timeout adjustments, and logging options.
+- **Usage Analytics:**  
+  - Integrate logging for usage metrics and error occurrences to guide future optimizations.
 
-- A single, **sequential** flow (hotkey → overlay → capture → OCR → clipboard).  
-- **Robust error handling** with immediate resource cleanup on error or ESC cancellation.  
-- **Modern APIs** (ScreenCaptureKit) replacing deprecated methods.  
-- **Strict resource management** to avoid partial captures or locked streams.  
-- **A minimal user interface** that places a spinner in the top-left corner and avoids capturing the ClipText app itself.
+---
 
-By following these requirements and implementation details, **ClipText v2** will provide a stable, secure, and user-friendly screen-to-text capture experience on modern macOS versions.
+## **9. Summary**
+
+ClipText v2 is engineered to deliver a seamless, reliable screen-to-text capture experience on macOS. By leveraging modern ScreenCaptureKit APIs and enforcing a strict sequential capture–process–deliver workflow, the app meets both user expectations and technical best practices. With robust error handling, immediate cancellation support, secure API management, and a modular architecture, this PRD provides a comprehensive blueprint for building ClipText v2 successfully.
