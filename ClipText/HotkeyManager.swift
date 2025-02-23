@@ -1,79 +1,133 @@
 import Cocoa
 import Carbon.HIToolbox
+import AppKit
 
-class HotkeyManager {
-    var onHotkeyTriggered: (() -> Void)?
-    private var eventHandlerRef: EventHandlerRef?
+final class HotkeyManager {
+    private var eventHandler: EventHandlerRef?
     private var hotKeyRef: EventHotKeyRef?
+    private var lastTriggerTime: Date = .distantPast
+    private let debounceInterval: TimeInterval = 1.0 // Prevent triggers within 1 second
+    var onHotkeyTriggered: (() -> Void)?
     
     init() {
+        print("HotkeyManager: Initializing...")
         registerHotkey()
     }
     
     deinit {
+        print("HotkeyManager: Cleaning up...")
         unregisterHotkey()
     }
     
-    private func registerHotkey() {
-        // Define the hotkey (Control + Shift + 9)
-        var keyID = EventHotKeyID()
-        keyID.signature = OSType("CLIP".utf8.reduce(0) { ($0 << 8) + UInt32($1) })
-        keyID.id = UInt32(0)
+    // Static callback for Carbon event
+    private static let hotKeyCallback: EventHandlerUPP = { (nextHandler, eventRef, userData) -> OSStatus in
+        guard let eventRef = eventRef,
+              let userData = userData else {
+            return OSStatus(eventNotHandledErr)
+        }
         
-        // Create the event type spec
+        // Get back our Swift object
+        let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+        print("HotkeyManager: Event received")
+        
+        // Check debounce
+        let now = Date()
+        if now.timeIntervalSince(manager.lastTriggerTime) < manager.debounceInterval {
+            print("HotkeyManager: Ignoring event due to debounce")
+            return noErr
+        }
+        manager.lastTriggerTime = now
+        
+        // Verify it's our hotkey
+        var hotKeyID = EventHotKeyID()
+        let error = GetEventParameter(
+            eventRef,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        
+        guard error == noErr else {
+            print("HotkeyManager: Error getting event parameter: \(error)")
+            return error
+        }
+        
+        if hotKeyID.id == 1 {
+            print("HotkeyManager: Hotkey match confirmed")
+            DispatchQueue.main.async {
+                manager.onHotkeyTriggered?()
+            }
+            return noErr
+        }
+        
+        return CallNextEventHandler(nextHandler, eventRef)
+    }
+    
+    private func registerHotkey() {
+        print("HotkeyManager: Setting up event handler...")
+        
+        // Define event type for hotkey events
         var eventType = EventTypeSpec()
         eventType.eventClass = OSType(kEventClassKeyboard)
         eventType.eventKind = OSType(kEventHotKeyPressed)
         
+        // Create a unique ID for our hotkey
+        var hotKeyID = EventHotKeyID()
+        hotKeyID.id = 1
+        hotKeyID.signature = OSType(0x434C4950) // "CLIP" in hex
+        
+        // Create a context to pass to the callback
+        let context = UnsafeMutableRawPointer(Unmanaged.passRetained(self).toOpaque())
+        
         // Install event handler
-        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
-            { (nextHandler, eventRef, userData) -> OSStatus in
-                let manager = Unmanaged<HotkeyManager>.fromOpaque(userData!).takeUnretainedValue()
-                manager.hotkeyPressed()
-                return noErr
-            },
+            Self.hotKeyCallback,
             1,
             &eventType,
-            selfPtr,
-            &eventHandlerRef
+            context,
+            &eventHandler
         )
         
-        guard status == noErr else {
-            print("Failed to install event handler")
-            return
-        }
-        
-        // Register the hotkey
-        let hotKeyStatus = RegisterEventHotKey(
-            UInt32(25),  // Virtual keycode for '9'
-            UInt32(controlKey | shiftKey), // Modifiers
-            keyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
-        
-        guard hotKeyStatus == noErr else {
-            print("Failed to register hotkey")
-            return
+        if status == noErr {
+            print("HotkeyManager: Event handler installed successfully")
+            
+            // Register the hotkey
+            let registerStatus = RegisterEventHotKey(
+                UInt32(kVK_ANSI_9),  // Virtual keycode for '9'
+                UInt32(controlKey | shiftKey),
+                hotKeyID,
+                GetApplicationEventTarget(),
+                OptionBits(0),
+                &hotKeyRef
+            )
+            
+            if registerStatus == noErr {
+                print("HotkeyManager: Hotkey registered successfully")
+            } else {
+                print("HotkeyManager: Failed to register hotkey, status: \(registerStatus)")
+            }
+        } else {
+            print("HotkeyManager: Failed to install event handler, status: \(status)")
         }
     }
     
     private func unregisterHotkey() {
         if let hotKeyRef = hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
+            let status = UnregisterEventHotKey(hotKeyRef)
+            print("HotkeyManager: Unregistered hotkey with status: \(status)")
+            self.hotKeyRef = nil
         }
         
-        if let eventHandlerRef = eventHandlerRef {
-            RemoveEventHandler(eventHandlerRef)
+        if let handler = eventHandler {
+            let status = RemoveEventHandler(handler)
+            print("HotkeyManager: Removed event handler with status: \(status)")
+            eventHandler = nil
         }
     }
     
-    @objc private func hotkeyPressed() {
-        DispatchQueue.main.async { [weak self] in
-            self?.onHotkeyTriggered?()
-        }
-    }
+    static let shared = HotkeyManager()
 } 

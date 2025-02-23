@@ -1,12 +1,16 @@
-import Cocoa
+import AppKit
 
-class ClipboardManager {
+protocol ClipboardManagerProtocol {
+    func copyToClipboard(_ text: String)
+}
+
+final class ClipboardManager: ClipboardManagerProtocol {
     static let shared = ClipboardManager()
+    private let pasteboard = NSPasteboard.general
     
     private init() {}
     
     func copyToClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }

@@ -1,39 +1,61 @@
-import Cocoa
+import Foundation
+import AppKit
 
-enum OCRError: Error {
+protocol OCRServiceProtocol {
+    func performOCR(on image: NSImage) async throws -> String
+}
+
+enum OCRError: LocalizedError {
     case imageConversionFailed
     case invalidResponse
     case networkError(Error)
     case apiError(String)
+    case timeout
+    
+    var errorDescription: String? {
+        switch self {
+        case .imageConversionFailed:
+            return "Failed to convert image for processing"
+        case .invalidResponse:
+            return "Invalid response from OCR service"
+        case .networkError(let error):
+            return "Network error: \(error.localizedDescription)"
+        case .apiError(let message):
+            return "API error: \(message)"
+        case .timeout:
+            return "OCR request timed out"
+        }
+    }
 }
 
-class OCRService {
-    private let apiURL: URL
+final class OCRService: OCRServiceProtocol {
     private let apiKey: String
+    private let timeoutInterval: TimeInterval
+    private let session: URLSession
     
-    init(apiKey: String) {
+    init(apiKey: String, timeoutInterval: TimeInterval = 10) {
         self.apiKey = apiKey
-        // Construct URL with API key
-        var components = URLComponents(string: "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent")!
-        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
-        self.apiURL = components.url!
+        self.timeoutInterval = timeoutInterval
+        
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = timeoutInterval
+        config.timeoutIntervalForResource = timeoutInterval
+        self.session = URLSession(configuration: config)
     }
     
-    func performOCR(on image: NSImage, completion: @escaping (Result<String, OCRError>) -> Void) {
-        print("Starting OCR process...")
+    func performOCR(on image: NSImage) async throws -> String {
         guard let imageData = image.tiffRepresentation,
               let bitmapRep = NSBitmapImageRep(data: imageData),
               let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-            print("Failed to convert image to PNG")
-            completion(.failure(.imageConversionFailed))
-            return
+            throw OCRError.imageConversionFailed
         }
-        print("Successfully converted image to PNG, size: \(pngData.count) bytes")
         
-        var request = URLRequest(url: apiURL)
+        var components = URLComponents(string: "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent")!
+        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        
+        var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        print("Set up request with URL: \(apiURL)")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         let payload: [String: Any] = [
             "contents": [
@@ -53,69 +75,38 @@ class OCRService {
             ]
         ]
         
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            print("Successfully serialized payload")
-        } catch {
-            print("Failed to serialize payload: \(error)")
-            completion(.failure(.networkError(error)))
-            return
-        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         
-        print("Starting network request...")
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                print("Network error occurred: \(error)")
-                completion(.failure(.networkError(error)))
-                return
-            }
+        do {
+            let (data, response) = try await session.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                print("Invalid response type - not an HTTP response")
-                completion(.failure(.invalidResponse))
-                return
-            }
-            
-            print("Received response with status code: \(httpResponse.statusCode)")
-            if let data = data, let responseStr = String(data: data, encoding: .utf8) {
-                print("Response body: \(responseStr)")
+                throw OCRError.invalidResponse
             }
             
             guard (200...299).contains(httpResponse.statusCode) else {
-                let errorMessage = String(data: data ?? Data(), encoding: .utf8) ?? "Unknown error"
-                print("Error response from server: \(errorMessage)")
-                completion(.failure(.apiError(errorMessage)))
-                return
+                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
+                throw OCRError.apiError(errorMessage)
             }
             
-            guard let data = data else {
-                print("No data received in response")
-                completion(.failure(.invalidResponse))
-                return
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard let candidates = json?["candidates"] as? [[String: Any]],
+                  let firstCandidate = candidates.first,
+                  let content = firstCandidate["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]],
+                  let firstPart = parts.first,
+                  let text = firstPart["text"] as? String else {
+                throw OCRError.invalidResponse
             }
             
-            do {
-                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                print("Parsed JSON response: \(String(describing: json))")
-                
-                guard let candidates = json?["candidates"] as? [[String: Any]],
-                      let firstCandidate = candidates.first,
-                      let content = firstCandidate["content"] as? [String: Any],
-                      let parts = content["parts"] as? [[String: Any]],
-                      let firstPart = parts.first,
-                      let text = firstPart["text"] as? String else {
-                    print("Failed to parse expected JSON structure")
-                    completion(.failure(.invalidResponse))
-                    return
-                }
-                
-                print("Successfully extracted text: \(text)")
-                completion(.success(text))
-            } catch {
-                print("JSON parsing error: \(error)")
-                completion(.failure(.invalidResponse))
-            }
-        }.resume()
-        print("Network request started")
+            return text
+            
+        } catch let error as URLError where error.code == .timedOut {
+            throw OCRError.timeout
+        } catch let error as OCRError {
+            throw error
+        } catch {
+            throw OCRError.networkError(error)
+        }
     }
 } 
