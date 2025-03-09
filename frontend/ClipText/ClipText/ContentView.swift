@@ -9,11 +9,13 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var authViewModel = AuthViewModel()
+    @EnvironmentObject var appDelegate: AppDelegate
     
     var body: some View {
         Group {
             if authViewModel.isAuthenticated {
                 GeminiView(authViewModel: authViewModel)
+                    .environmentObject(appDelegate)
             } else {
                 LoginView(authViewModel: authViewModel)
             }
@@ -23,4 +25,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(AppDelegate())
 }

@@ -2,13 +2,21 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+// Constants for user preferences
+private struct UserPreferenceKeys {
+    static let autoClipboardCopy = "autoClipboardCopy"
+}
+
 struct GeminiView: View {
     @ObservedObject var authViewModel: AuthViewModel
+    @EnvironmentObject var appDelegate: AppDelegate
     @State private var prompt: String = ""
     @State private var response: String = ""
     @State private var isLoading: Bool = false
     @State private var error: String? = nil
     @State private var selectedImage: NSImage? = nil
+    @State private var showCopiedToast: Bool = false
+    @State private var autoCopyToClipboard: Bool = UserDefaults.standard.object(forKey: UserPreferenceKeys.autoClipboardCopy) == nil ? true : UserDefaults.standard.bool(forKey: UserPreferenceKeys.autoClipboardCopy)
     
     var body: some View {
         NavigationView {
@@ -86,17 +94,81 @@ struct GeminiView: View {
                 if !response.isEmpty {
                     ScrollView {
                         VStack(alignment: .leading) {
-                            Text("Response:")
-                                .font(.headline)
-                                .padding(.bottom, 4)
+                            HStack {
+                                Text("Response:")
+                                    .font(.headline)
+                                    .padding(.bottom, 4)
+                                
+                                Spacer()
+                                
+                                // Clear response button
+                                Button(action: clearResponse) {
+                                    HStack {
+                                        Image(systemName: "trash")
+                                        Text("Clear")
+                                    }
+                                    .padding(6)
+                                    .background(Color.red.opacity(0.2))
+                                    .foregroundColor(.red)
+                                    .cornerRadius(8)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .keyboardShortcut(.delete, modifiers: [.command])
+                                .help("Clear response (⌘⌫)")
+                                
+                                // Copy to clipboard button
+                                Button(action: copyToClipboard) {
+                                    HStack {
+                                        Image(systemName: "doc.on.clipboard")
+                                        Text("Copy")
+                                    }
+                                    .padding(6)
+                                    .background(Color.blue.opacity(0.2))
+                                    .foregroundColor(.blue)
+                                    .cornerRadius(8)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .keyboardShortcut("c", modifiers: [.command])
+                                .help("Copy to clipboard (⌘C)")
+                            }
                             
                             Text(response)
                                 .padding()
                                 .background(Color.gray.opacity(0.2))
                                 .cornerRadius(10)
+                                .textSelection(.enabled) // Enable text selection for manual copying
+                            
+                            // Improved auto-copy toggle
+                            HStack {
+                                Toggle(isOn: Binding(
+                                    get: { autoCopyToClipboard },
+                                    set: { 
+                                        autoCopyToClipboard = $0
+                                        // Save preference when changed
+                                        UserDefaults.standard.set($0, forKey: UserPreferenceKeys.autoClipboardCopy)
+                                    }
+                                )) {
+                                    Text("Auto-copy responses")
+                                        .font(.subheadline)
+                                }
+                                .toggleStyle(SwitchToggleStyle(tint: .blue))
+                                
+                                Spacer()
+                                
+                                Text("Automatically copy new responses to clipboard")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 4)
+                            .background(Color.gray.opacity(0.1))
+                            .cornerRadius(8)
                         }
                         .padding(.horizontal)
                     }
+                    
+                    // Clipboard toast notification
+                    clipboardToastView
                 }
                 
                 Spacer()
@@ -107,6 +179,49 @@ struct GeminiView: View {
                 ToolbarItem(placement: .automatic) {
                     Button(action: authViewModel.logout) {
                         Text("Logout")
+                    }
+                }
+            }
+        }
+    }
+    
+    private func copyToClipboard() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(response, forType: .string)
+        
+        withAnimation {
+            showCopiedToast = true
+        }
+    }
+    
+    private func clearResponse() {
+        withAnimation {
+            response = ""
+        }
+    }
+    
+    // Updated toast message view
+    private var clipboardToastView: some View {
+        Group {
+            if showCopiedToast {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.white)
+                    Text(autoCopyToClipboard ? "Auto-copied to clipboard!" : "Copied to clipboard!")
+                }
+                .padding(10)
+                .background(Color.green.opacity(0.9))
+                .foregroundColor(.white)
+                .cornerRadius(10)
+                .shadow(radius: 2)
+                .padding(.top, 4)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        withAnimation {
+                            showCopiedToast = false
+                        }
                     }
                 }
             }
@@ -207,6 +322,14 @@ struct GeminiView: View {
                     case .success(let text):
                         print("Received successful response: \"\(text.prefix(50))...\"")
                         self.response = text
+                        
+                        // Update AppDelegate with last response
+                        self.appDelegate.updateLastResponse(text)
+                        
+                        // Auto-copy to clipboard if enabled
+                        if self.autoCopyToClipboard {
+                            self.copyToClipboard()
+                        }
                     case .failure(let error):
                         print("Received error response: \(error)")
                         if let nsError = error as NSError? {
@@ -231,6 +354,14 @@ struct GeminiView: View {
                     case .success(let text):
                         print("Received successful response: \"\(text.prefix(50))...\"")
                         self.response = text
+                        
+                        // Update AppDelegate with last response
+                        self.appDelegate.updateLastResponse(text)
+                        
+                        // Auto-copy to clipboard if enabled
+                        if self.autoCopyToClipboard {
+                            self.copyToClipboard()
+                        }
                     case .failure(let error):
                         print("Received error response: \(error)")
                         if let nsError = error as NSError? {
