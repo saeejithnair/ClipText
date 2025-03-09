@@ -19,5 +19,7 @@
     <array>
         <string>org-appextension-feature-password-management</string>
     </array>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>ClipText needs screen capture permission to create screenshots that can be sent to Gemini.</string>
 </dict>
 </plist> 

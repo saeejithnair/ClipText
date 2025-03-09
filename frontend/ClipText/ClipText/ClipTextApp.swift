@@ -11,12 +11,28 @@ import AppKit
 import UserNotifications
 import Combine
 
-class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+// Define a notification name for screenshot capture
+extension Notification.Name {
+    static let didCaptureScreenshot = Notification.Name("didCaptureScreenshot")
+}
+
+// Make the class explicitly conform to @unchecked Sendable to handle thread safety manually
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, ScreenshotCaptureDelegate, @unchecked Sendable {
     var statusItem: NSStatusItem?
     @Published var lastResponse: String = ""
     
+    // Global monitor for keyboard events
+    private var globalKeyMonitor: Any?
+    // Screenshot capture controller
+    private var screenshotController: ScreenshotCaptureController?
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
+        registerHotkey()
+        
+        // Initialize screenshot controller
+        screenshotController = ScreenshotCaptureController()
+        screenshotController?.delegate = self
         
         // Request notification permission
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
@@ -26,6 +42,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 print("Notification permission error: \(error)")
             }
         }
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean up global monitor
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+    
+    // Register global hotkey (ctrl + shift + 9)
+    private func registerHotkey() {
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Check for Ctrl+Shift+9 (keycode 25 is '9')
+            let isCommandDown = event.modifierFlags.contains(.control)
+            let isShiftDown = event.modifierFlags.contains(.shift)
+            let isKeycode9 = event.keyCode == 25
+            
+            if isCommandDown && isShiftDown && isKeycode9 {
+                print("Screenshot hotkey detected")
+                self?.startScreenshotCapture()
+            }
+        }
+    }
+    
+    // Make this method public so it can be called from GeminiView
+    func startScreenshotCapture() {
+        DispatchQueue.main.async { [weak self] in
+            self?.screenshotController?.beginCapture()
+        }
+    }
+    
+    // MARK: - Screenshot Capture Delegate Methods
+    
+    func didCaptureScreenshot(_ image: NSImage) {
+        print("Screenshot captured: \(image.size)")
+        
+        // Post notification with the captured image
+        NotificationCenter.default.post(
+            name: .didCaptureScreenshot,
+            object: nil,
+            userInfo: ["image": image]
+        )
+    }
+    
+    func didCancelScreenshotCapture() {
+        print("Screenshot capture cancelled")
     }
     
     func setupMenuBar() {

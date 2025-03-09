@@ -18,6 +18,9 @@ struct GeminiView: View {
     @State private var showCopiedToast: Bool = false
     @State private var autoCopyToClipboard: Bool = UserDefaults.standard.object(forKey: UserPreferenceKeys.autoClipboardCopy) == nil ? true : UserDefaults.standard.bool(forKey: UserPreferenceKeys.autoClipboardCopy)
     
+    // New property to hold screenshot observer
+    private let screenshotObserver = NotificationCenter.default.publisher(for: .didCaptureScreenshot)
+    
     var body: some View {
         NavigationView {
             VStack(spacing: 16) {
@@ -28,7 +31,7 @@ struct GeminiView: View {
                     .cornerRadius(10)
                     .padding(.horizontal)
                 
-                // Image selection
+                // Image selection with screenshot button
                 HStack {
                     if let image = selectedImage {
                         Image(nsImage: image)
@@ -59,6 +62,26 @@ struct GeminiView: View {
                         .cornerRadius(8)
                     }
                     .buttonStyle(PlainButtonStyle())
+                    .keyboardShortcut("o", modifiers: [.command])
+                    .help("Open image picker (⌘O)")
+                    
+                    // New screenshot button
+                    Button(action: {
+                        // Use appDelegate to trigger screenshot capture
+                        appDelegate.startScreenshotCapture()
+                    }) {
+                        HStack {
+                            Image(systemName: "camera.viewfinder")
+                            Text("Screenshot")
+                        }
+                        .padding(8)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .keyboardShortcut("9", modifiers: [.control, .shift])
+                    .help("Take screenshot (⌃⇧9)")
                     
                     Spacer()
                 }
@@ -180,6 +203,13 @@ struct GeminiView: View {
                     Button(action: authViewModel.logout) {
                         Text("Logout")
                     }
+                }
+            }
+            // Add onReceive to observe screenshot notifications
+            .onReceive(screenshotObserver) { notification in
+                if let image = notification.userInfo?["image"] as? NSImage {
+                    // Update selected image with the screenshot
+                    selectedImage = image
                 }
             }
         }
